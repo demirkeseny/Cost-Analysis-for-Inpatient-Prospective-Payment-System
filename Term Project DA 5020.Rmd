@@ -1,0 +1,282 @@
+---
+title: "Term Project DA 5020"
+author: "Yalim Demirkesen"
+date: "June 8, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# R CODE
+
+The scraped data is stored in R :
+
+```{r}
+mydata <- read.csv("C:\\Users\\demir\\OneDrive\\NEU\\Fall 2017\\DA 5020\\Project\\Project\\Inpatient_Data_2011_CSV\\Medicare_Provider_Charge_Inpatient_DRG100_FY2011.csv")
+```
+
+Let's check the quality of the data. Since it is from a govermental web site, I don't expect any missing data. So preparation stage should be minimal. Let's see whether every column runs as expected:
+
+```{r}
+na_matrix <- matrix(0, nrow = ncol(mydata), ncol = 1)
+rownames(na_matrix) <- colnames(mydata)
+colnames(na_matrix) <- c("NAs")
+for(i in 1:ncol(mydata)){
+  if(any(is.na(mydata[,i] == 'TRUE'))){
+    na_matrix[i,1] <- 1  
+  }
+}
+na_matrix
+```
+
+As we expected there is no NAs in any of the columns. What I did to compute this is first I started with creating a matrix with the name of "na_matrix" with one columns and as many as rows as the number of columns in my main dataset. Then with the help of an if function, I checked whether there are any NAs throughout the columns. If there are, corresponding row would have the value of 1. Since all the rows are 0, there is no NA in my dataset. 
+
+Let's see the type of columns:
+
+```{r}
+str(mydata)
+```
+
+Everything seems fine here. The numbers are stated as integers or numbers and the strings are represented as factors.
+
+Next step is storing our data in a relational database. Since we also have too many strings we may need a database that is document-oriented. So my choice is using mongoDB here. It will store the discharge values in a so called Binary JSON (BSON). After connecting to the server of mongoDB, we can start insterting the data to the mongoDB.
+
+First I will create two different data frames since it will be much easier to store them like this. First one will include information about the providers; provider ID, provider name, address, zip code, state, city and in the second one information about the discharges; DRG definition, provider ID, provider name, total discharges, average covered charges, average total payments, average medicare payments.
+
+```{r}
+provider1 <- mydata[,2:8]
+discharge1 <- mydata[,c(1,2,3,9,10,11,12)]
+```
+
+By the provider column I need to be sure that there is only one provider per row. There shouldn't be more than one row for the same hospital.
+
+```{r}
+provider <- unique(provider1)
+```
+
+```{r}
+nrow(provider1)-nrow(provider)
+```
+
+So there were almost 160000 duplicated values that we got rid of. Now the provider data, consists of entirely different rows.
+
+And we need to do the same for the discharge.
+
+```{r}
+discharge <- unique(discharge1)
+```
+
+```{r}
+nrow(discharge1)-nrow(discharge)
+```
+
+It seems each row is already different from the other.
+
+Just to visualize the two subdatasets:
+
+```{r}
+head(provider)
+```
+
+```{r}
+head(discharge)
+```
+
+Then the data is created in mongoDB and its inserted to the database. 
+
+```{r}
+library(mongolite)
+providerDB <- mongo(collection = "provider", db = "healthcare")
+dischargeDB <- mongo(collection = "discharge", db = "healthcare")
+mydataDB <- mongo(collection = "mydata", db = "healthcare")
+```
+
+```{r}
+str(providerDB)
+str(dischargeDB)
+str(mydataDB)
+```
+
+```{r}
+providerDB$insert(provider)
+dischargeDB$insert(discharge)
+mydataDB$insert(mydata)
+```
+
+Now we can start with some queries with the help of mongoDB:
+
+```{r}
+providerDB$count()
+```
+
+There are 3337 rows in the providerDB database.
+
+```{r}
+dischargeDB$count()
+```
+
+There are 163065 rows in both discharge and mydata datasets. Since each row represents a different discharge, the discharge and mydata consists of same number of rows.
+
+# QUERIES
+
+Number of hospitals in MA:
+
+```{r}
+providerDB$count('{"Provider_State":"MA"}')
+```
+
+The state with most number of hospitals:
+
+```{r}
+vec1 <- providerDB$aggregate('[{"$group":{"_id":"$Provider_State", "count": {"$sum":1}}}]')
+head(vec1[with(vec1, order(-count)),],10)
+```
+
+In Texas the number of hospitals that is qualified for CMS standarts and can provide IPPS data is 310, which is the maximum value in our dataset. Then comes California with 299, Florida with 166, New York with 161, Pennsylvania with 151 and then goes on like that.
+
+If we need any healthcare facility around Northeastern University, we need to visit following hospitals:
+
+```{r}
+providerDB$find('{"Provider_City":"BOSTON"}')
+```
+
+It would be also good to know how much is the average coverage of the hospital to its overall costs. Depending on this value the patients or the insurance companies will be influenced. Less the coverage gets, more patients will get charged. 
+
+```{r}
+vec2 <- mydataDB$aggregate('[{"$group":{"_id":"$Provider_State", "avg": {"$avg":"$Average_Covered_Charges"}}}]')
+head(vec2[with(vec2, order(-avg)),],10)
+```
+
+So we can say that California is the state with the highest on average coverage for healthcare charges in the US.
+
+Let's see California's average total payment by the US Government. Total coverage being high may be caused by low average total payment. For this purpose, we might need a ggplot function.
+
+```{r}
+vec3 <- mydataDB$aggregate('[{"$group":{"_id":"$Provider_State", "avg": {"$avg":"$Average_Total_Payments"}}}]')
+colnames(vec3) <- c("ID","Average")
+```
+
+Now for the plot:
+
+```{r}
+library(ggplot2)
+ggplot(vec3, aes(x = ID, y = Average)) + 
+  geom_point(colour="blue") +
+  geom_point(data=vec3[40, ], aes(x=ID, y=Average), colour="red", size=5)
+```
+
+As we can see from the graph, actually the average total payment to California is one of the biggest. To be more precise it is in top 5. This graph helps us to understand that our theory is wrong. So is it the opposite? Is it so that the reason of US Government to pay them more is the high amount that the hospitals should cover by themselves?
+
+To see that we need to check couple of more examples. In the above graph we see that Alaska is the state with highest total payment average. Also we remember that Alaska is also the 8th state in respect to the high coverage rate. We can prove that high coverage amount leads to high total payment if we can one example on the other side. AL is the state with the lowest total payment average. Is it because it has also the lowest average covered charges?
+
+```{r}
+tail(vec2[with(vec2, order(-avg)),],20)
+```
+
+When we print out the 20 states with the lowest average covered charges, Alabama is not amongst them. So we cannot see the correlation from here. The last option that we can do is to create a linear regression model to see the influence of average covered amount on average total payment. 
+
+```{r}
+model <- lm(Average.Total.Payments ~ Total.Discharges + Average.Covered.Charges + Average.Medicare.Payments, 
+            data = mydata)
+summary(model)
+```
+
+When we build a model that consists of total discharges, average covered charges and average medicare payments on total discharges, we see that all the predictors are statistically significant because they all have p values much lower than 0.05. 
+
+To check another information, we consider all the cities in Connecticut. This time we will take into account the average medicare payments. To be able to benefit from the mongoDB, we created a new data frame just including the Connecticut hospitals. Then we inserted the data to our mongoDB database, which enabled us to use our queries. 
+
+```{r}
+mydata_CT <- mydata[grep("CT", mydata$Provider.State), ]
+mydata_CT_DB <- mongo(collection = "mydata_CT_DB", db = "healthcare")
+str(mydata_CT_DB)
+```
+
+```{r}
+mydata_CT_DB$insert(mydata_CT)
+```
+
+```{r}
+vec4 <- mydata_CT_DB$aggregate('[{"$group":{"_id":"$Provider_City", "avg": {"$avg":"$Average_Medicare_Payments"}}}]')
+colnames(vec4) <- c("ID","Average")
+```
+
+Below you can see the graph of the data points for each city in Connecticut. To give a better understanding, I drew a line representing the mean of the average medicare payment. 
+
+```{r}
+library(ggplot2)
+ggplot(vec4, aes(x = ID, y = Average)) + 
+  geom_point(colour="blue") + 
+  geom_hline(yintercept = mean(vec4$Average), color="red") + 
+  geom_text(aes(label=ID),hjust=0, vjust=0)
+```
+
+So we can say that in CT, Farmington is the city with the highest average medicare payment. Second comes the New Haven. On the other hand Putnam is the city in CT, that get least average medicare payment. This is a point to think about since the payment that Farmington gets is more than the doubled amount that Putnam gets.
+
+As last I want to include analysis about the discharge of the patients. This number underlines how active a hospital is and depending on all the hospitals, it shows how active the city and state is. Depending on the result of this analysis, US government can consider adjusting the investment that it does in that certain location.
+
+```{r}
+vec5 <- mydataDB$aggregate('[{"$group":{"_id":"$Provider_Name","max":{"$max":"$Total_Discharges"}}}]')
+head(vec5[with(vec5, order(-max)),],10)
+```
+
+Here we got an interesting outcome since the hospital with the most discharges is Hospital For Special Surgery. With the help of mongoDB, I will extract the location of thaat hospital.
+
+```{r}
+providerDB$find('{"Provider_Name":"HOSPITAL FOR SPECIAL SURGERY"}')
+```
+
+It seems that the loaction of the facility id in New York, NY. Let's see the states with maximum hospital discharges.
+
+```{r}
+vec6 <- mydataDB$aggregate('[{"$group":{"_id":"$Provider_State","max":{"$max":"$Total_Discharges"}}}]')
+colnames(vec6) <- c("ID","Max")
+head(vec6[with(vec6, order(-Max)),],10)
+```
+
+```{r}
+library(ggplot2)
+ggplot(vec6, aes(x = ID, y = Max)) + 
+  geom_point(colour="blue") + 
+  geom_hline(yintercept = mean(vec6$Max), color="red") + 
+  geom_text(aes(label=ID),hjust=0, vjust=0)
+```
+
+As we can see New York is an outlier but when we compare it with the other states. On the other hand all the discharges that are registered to NY, is coming from one and only hospital. That fact leaves the Hospital For Special Surgery as number one among the other hospitals by a huge margin. If we need to compare the discharge numbers of hospitals:
+
+```{r}
+vec7 <- mydataDB$aggregate('[{"$group":{"_id":"$Provider_Name","max":{"$max":"$Total_Discharges"}}}]')
+colnames(vec7) <- c("ID","Max")
+vec7 <- head(vec7[with(vec7, order(-Max)),],20)
+```
+
+```{r}
+library(ggplot2)
+ggplot(vec7, aes(x = ID, y = Max)) + 
+  geom_point(colour="blue") + 
+  geom_hline(yintercept = mean(vec7$Max), color="red") + 
+  geom_text(aes(label=ID),hjust=0, vjust=0)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
